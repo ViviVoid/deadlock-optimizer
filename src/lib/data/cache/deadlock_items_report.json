@@ -1,0 +1,10 @@
+{
+  "fetched_at": "2026-04-29T06:44:13.410196+00:00",
+  "source": "https://assets.deadlock-api.com/v2/items/by-slot-type",
+  "selected_count": 172,
+  "missing_by_slot": {
+    "weapon": [],
+    "vitality": [],
+    "spirit": []
+  }
+}
