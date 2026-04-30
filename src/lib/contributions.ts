@@ -1,4 +1,4 @@
-﻿import { evaluateBuild } from "@/lib/engine";
+import { evaluateBuild } from "@/lib/engine";
 import type { BuildConfig, Dataset } from "@/lib/types";
 
 export type ItemContribution = {
@@ -9,7 +9,7 @@ export type ItemContribution = {
 };
 
 function metric(result: ReturnType<typeof evaluateBuild>): number {
-  return result.guardrailedDps;
+  return result.finalDpsMaxBoon;
 }
 
 export function marginalContributions(dataset: Dataset, baseBuild: BuildConfig): ItemContribution[] {

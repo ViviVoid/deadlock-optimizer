@@ -1,37 +1,61 @@
-﻿import type {
+import type {
   BuildConfig,
   Dataset,
-  EnemyProfile,
   Hero,
   Item,
-  Scenario,
   TeamModifier,
 } from "@/lib/types";
 
 export type DamageBreakdown = {
-  baseDamage: number;
+  baseBulletDamage: number;
+  boonBulletDamage: number;
+  maxBoonBulletDamage: number;
   weaponDamageMultiplier: number;
-  flatBonus: number;
-  falloff: number;
-  resistances: number;
-  critMultiplier: number;
+  /** Souls spent on equipped gun-slot items (sum of baseCost, category gun). */
+  weaponSoulInvestment: number;
+  /** Wiki table: bonus weapon damage as a fraction (e.g. 0.13 for +13%). */
+  gunInvestmentWeaponPct: number;
+  fireRateMultiplier: number;
+  clipMultiplier: number;
+  reloadMultiplier: number;
+  flatWeaponDamage: number;
+  flatBaseDamage: number;
   damageAmplification: number;
-  finalDamagePerBullet: number;
 };
 
 export type BuildResult = {
   hero: Hero;
-  enemy: EnemyProfile;
-  scenario: Scenario;
   selectedItems: Item[];
   selectedTeamModifiers: TeamModifier[];
+  soulCountUsed: number;
+  /** Sum of `baseCost` for equipped items in the gun (weapon) category — drives shop investment weapon %. */
+  weaponSoulInvestment: number;
+  /** Wiki weapon-shop investment row applied as a fraction (e.g. 0.13). */
+  gunInvestmentWeaponPct: number;
+  boonCount: number;
   totalCost: number;
-  budgetValid: boolean;
-  rawDps: number;
-  guardrailedDps: number;
-  burstWindowDamage: number;
-  ehpMultiplier: number;
-  assumptions: string[];
+  activeConditionals: string[];
+  rows: Array<{
+    label: "Base" | "@Boon" | "@MaxBoon";
+    /** Hero gun bullet stat for this tier (pre–weapon-damage multiplier). */
+    rawBulletDamage: number;
+    /** Per pellet after weapon damage % (items + gun shop souls), flat adds, and damage amp. */
+    bulletDamage: number;
+    rof: number;
+    perShot: number;
+    dps: number;
+    headshotDps: number;
+  }>;
+  finalPerShotBase: number;
+  finalPerShotBoon: number;
+  finalDpsBase: number;
+  finalDpsBoon: number;
+  finalPerShotMaxBoon: number;
+  finalDpsMaxBoon: number;
+  finalDpsHeadshotBase: number;
+  finalDpsHeadshotBoon: number;
+  finalDpsHeadshotMaxBoon: number;
+  bulletVelocityLabel: string;
   breakdown: DamageBreakdown;
 };
 
@@ -39,12 +63,33 @@ function sum<T>(arr: T[], getter: (item: T) => number): number {
   return arr.reduce((acc, item) => acc + getter(item), 0);
 }
 
+function itemContributesToTotals(item: Item, conditionalStates: Record<string, boolean>): boolean {
+  if (!item.conditionalId) return true;
+  if (item.conditionalEffects) return true;
+  return Boolean(conditionalStates[item.conditionalId]);
+}
+
+function mergedItemEffects(item: Item, conditionalStates: Record<string, boolean>) {
+  const base = item.effects;
+  const condOn = item.conditionalId ? Boolean(conditionalStates[item.conditionalId]) : true;
+  const extra = item.conditionalEffects && condOn ? item.conditionalEffects : {};
+  return {
+    weaponDamagePct: base.weaponDamagePct + (extra.weaponDamagePct ?? 0),
+    fireRatePct: base.fireRatePct + (extra.fireRatePct ?? 0),
+    clipSizePct: base.clipSizePct + (extra.clipSizePct ?? 0),
+    reloadReductionPct: base.reloadReductionPct + (extra.reloadReductionPct ?? 0),
+    bulletLifestealPct: base.bulletLifestealPct + (extra.bulletLifestealPct ?? 0),
+    flatWeaponDamage: base.flatWeaponDamage + (extra.flatWeaponDamage ?? 0),
+    flatBaseDamage: base.flatBaseDamage + (extra.flatBaseDamage ?? 0),
+    damageAmplificationPct: base.damageAmplificationPct + (extra.damageAmplificationPct ?? 0),
+  };
+}
+
 export function resolveBuild(dataset: Dataset, build: BuildConfig) {
-  const hero = dataset.heroes.find((h) => h.id === build.heroId);
-  const enemy = dataset.enemies.find((e) => e.id === build.enemyId);
-  const scenario = dataset.scenarios.find((s) => s.id === build.scenarioId);
-  if (!hero || !enemy || !scenario) {
-    throw new Error("Build references unknown hero/enemy/scenario");
+  const hero = dataset.heroes.find((h) => h.id === build.heroId) ?? dataset.heroes[0];
+  const scenario = dataset.scenarios.find((s) => s.id === build.scenarioId) ?? dataset.scenarios[0];
+  if (!hero || !scenario || dataset.items.length === 0) {
+    throw new Error("Dataset is missing required heroes/scenarios/items");
   }
 
   const selectedItems = build.itemIds
@@ -55,7 +100,7 @@ export function resolveBuild(dataset: Dataset, build: BuildConfig) {
     .map((id) => dataset.teamModifiers.find((tm) => tm.id === id))
     .filter((tm): tm is TeamModifier => Boolean(tm));
 
-  return { hero, enemy, scenario, selectedItems, selectedTeamModifiers };
+  return { hero, scenario, selectedItems, selectedTeamModifiers };
 }
 
 export function effectiveItemCost(item: Item, selectedItems: Item[]): number {
@@ -66,127 +111,160 @@ export function effectiveItemCost(item: Item, selectedItems: Item[]): number {
   return Math.max(item.baseCost - (parent?.baseCost ?? 0), 0);
 }
 
-function computeFalloff(distanceMeters: number, hero: Hero): number {
-  const { falloffNearMeters, falloffFarMeters } = hero.stats;
-  if (distanceMeters <= falloffNearMeters) return 1;
-  if (distanceMeters >= falloffFarMeters) return 0.1;
-  const t =
-    (distanceMeters - falloffNearMeters) /
-    (falloffFarMeters - falloffNearMeters);
-  return 1 - t * 0.9;
+export function boonsForSouls(dataset: Dataset, soulCount: number): number {
+  let current = 0;
+  for (const step of dataset.boonBreakpoints) {
+    if (soulCount >= step.souls) current = step.boons;
+    else break;
+  }
+  return current;
 }
 
-function computeCritMultiplier(hero: Hero, enemy: EnemyProfile): number {
-  if (!hero.stats.canCrit || hero.noCritException) return 1;
-  const critBase = 1 + 0.65 * (1 + hero.stats.critBonusScale);
-  return critBase * enemy.critResistMultiplier * enemy.headshotTakenMultiplier;
-}
-
-function computeAbilityDps(hero: Hero, scenario: Scenario, guardrailed: boolean): number {
-  if (!hero.abilities.length) return 0;
-
-  return hero.abilities.reduce((acc, ability) => {
-    const guard = ability.guardrails;
-    const tickSec =
-      (guardrailed && scenario.useObservedTickRate ? guard.tickIntervalMs : 1000) /
-      1000;
-    const maxTicks = ability.activeDurationSec / tickSec;
-    const castsPerWindow = scenario.sustainedDurationSec / ability.cooldownSec;
-    const uptimePenalty = guardrailed ? guard.maxMaintainedUptimePct : 1;
-    const losPenalty =
-      guardrailed && guard.requiresLineOfSight && !scenario.assumePerfectLineOfSight
-        ? 0.78
-        : 1;
-    const animationPenalty =
-      guardrailed && !scenario.ignoreAnimationLocks
-        ? Math.max(1 - (guard.castTimeMs + guard.recoveryTimeMs) / 10000, 0.7)
-        : 1;
-
-    const totalDamage =
-      maxTicks * ability.damagePerTick * castsPerWindow * uptimePenalty * losPenalty * animationPenalty;
-
-    return acc + totalDamage / scenario.sustainedDurationSec;
-  }, 0);
+/** Weapon shop investment: highest wiki tier at or below `weaponSoulInvestment`. */
+export function gunInvestmentWeaponDamagePct(dataset: Dataset, weaponSoulInvestment: number): number {
+  let best = 0;
+  for (const step of dataset.weaponInvestmentBreakpoints) {
+    if (weaponSoulInvestment >= step.souls) best = step.weaponDamagePct;
+  }
+  return best;
 }
 
 export function evaluateBuild(dataset: Dataset, build: BuildConfig): BuildResult {
-  const { hero, enemy, scenario, selectedItems, selectedTeamModifiers } = resolveBuild(dataset, build);
+  const { hero, scenario, selectedItems, selectedTeamModifiers } = resolveBuild(dataset, build);
+  const activeConditionals = selectedItems
+    .filter((item) => item.conditionalId && build.conditionalStates[item.conditionalId])
+    .map((item) => item.conditionalId as string);
+  const contributingItems = selectedItems.filter((item) => itemContributesToTotals(item, build.conditionalStates));
+
+  const soulCountUsed =
+    build.soulMode === "autoFromItems"
+      ? selectedItems.reduce((acc, item) => acc + item.baseCost, 0)
+      : build.soulCount;
+
+  const weaponSoulInvestment = selectedItems
+    .filter((item) => item.category === "gun")
+    .reduce((acc, item) => acc + item.baseCost, 0);
+  const gunInvestmentWeaponPct = gunInvestmentWeaponDamagePct(dataset, weaponSoulInvestment);
 
   const totalWeaponPct =
-    sum(selectedItems, (i) => i.effects.weaponDamagePct) +
+    contributingItems.reduce((acc, i) => acc + mergedItemEffects(i, build.conditionalStates).weaponDamagePct, 0) +
     sum(selectedTeamModifiers, (tm) => tm.weaponDamagePct);
-  const totalFireRatePct = sum(selectedItems, (i) => i.effects.fireRatePct);
-  const totalFlatBonus = sum(selectedItems, (i) => i.effects.flatWeaponDamage) + hero.stats.flatWeaponDamage;
-  const totalResistReduction =
-    sum(selectedItems, (i) => i.effects.bulletResistReductionPct) +
-    sum(selectedTeamModifiers, (tm) => tm.bulletResistReductionPct);
+  const totalFireRatePct =
+    contributingItems.reduce((acc, i) => acc + mergedItemEffects(i, build.conditionalStates).fireRatePct, 0) +
+    sum(selectedTeamModifiers, (tm) => tm.fireRatePct);
+  const totalClipSizePct = contributingItems.reduce(
+    (acc, i) => acc + mergedItemEffects(i, build.conditionalStates).clipSizePct,
+    0
+  );
+  const totalReloadReductionPct =
+    contributingItems.reduce(
+      (acc, i) => acc + mergedItemEffects(i, build.conditionalStates).reloadReductionPct,
+      0
+    ) + sum(selectedTeamModifiers, (tm) => tm.reloadReductionPct);
+  const totalFlatWeaponDamage = contributingItems.reduce(
+    (acc, i) => acc + mergedItemEffects(i, build.conditionalStates).flatWeaponDamage,
+    0
+  );
+  const totalFlatBaseDamage = contributingItems.reduce(
+    (acc, i) => acc + mergedItemEffects(i, build.conditionalStates).flatBaseDamage,
+    0
+  );
   const totalDamageAmp =
-    sum(selectedItems, (i) => i.effects.damageAmplificationPct) +
-    sum(selectedTeamModifiers, (tm) => tm.damageAmplificationPct);
+    contributingItems.reduce(
+      (acc, i) => acc + mergedItemEffects(i, build.conditionalStates).damageAmplificationPct,
+      0
+    ) + sum(selectedTeamModifiers, (tm) => tm.damageAmplificationPct);
 
-  const baseDamage = hero.stats.baseDamage;
-  const weaponDamageMultiplier = hero.boonsWeaponDamageMultiplier * (1 + totalWeaponPct);
-  const falloff = computeFalloff(scenario.distanceMeters, hero);
-  const effectiveResistPct = enemy.bulletResistPct * (1 - totalResistReduction);
-  const resistances = 1 - effectiveResistPct;
-  const critMultiplier = 1 + (computeCritMultiplier(hero, enemy) - 1) * hero.stats.headshotRatio;
-  const damageAmplification = scenario.enableExperimentalDamageAmp ? 1 + totalDamageAmp : 1;
+  const boonCount = boonsForSouls(dataset, soulCountUsed);
+  const boonBulletDamage = Math.min(
+    hero.gun.bulletDamageStart + boonCount * hero.gun.bulletDamagePerBoon,
+    hero.gun.bulletDamageMaxBoon
+  );
+  const baseBulletDamage = hero.gun.bulletDamageStart;
+  const maxBoonBulletDamage = hero.gun.bulletDamageMaxBoon;
+  const weaponDamageMultiplier = 1 + totalWeaponPct + gunInvestmentWeaponPct;
+  const fireRateMultiplier = 1 + totalFireRatePct;
+  const clipMultiplier = 1 + hero.gun.clipSizePct + totalClipSizePct;
+  const reloadMultiplier = Math.max(1 - (hero.gun.reloadReductionPct + totalReloadReductionPct), 0.1);
+  const damageAmplification = 1 + totalDamageAmp;
 
-  const finalDamagePerBullet =
-    ((baseDamage * weaponDamageMultiplier + totalFlatBonus) *
-      falloff *
-      resistances *
-      critMultiplier *
-      damageAmplification);
+  // Headshot damage multiplier: base 1.65, modified by hero crit bonus scale.
+  const headshotMultiplier = 1.65 + hero.gun.critBonusScalePct / 100;
 
-  const fireRate = hero.stats.fireRate * (1 + totalFireRatePct);
-  const cycleSeconds = hero.stats.magazineSize / fireRate + hero.stats.reloadTimeSec;
-  const sustainedFireRate =
-    scenario.includeReloadCycle && !scenario.continuousFireAssumption
-      ? hero.stats.magazineSize / cycleSeconds
-      : fireRate;
+  const bulletsPerSecond = hero.gun.baseRof * fireRateMultiplier;
+  const magazineSize = hero.gun.ammo * clipMultiplier;
+  const reloadSec = hero.gun.reloadTimeSec * reloadMultiplier;
+  const sustainedBulletsPerSecond =
+    scenario.includeReloadCycle ? magazineSize / (magazineSize / bulletsPerSecond + reloadSec) : bulletsPerSecond;
 
-  const rawWeaponDps = finalDamagePerBullet * sustainedFireRate;
-  const rawAbilityDps = computeAbilityDps(hero, scenario, false);
-  const guardrailedAbilityDps = computeAbilityDps(hero, scenario, true);
+  function computeRow(label: "Base" | "@Boon" | "@MaxBoon", rawBulletDamage: number) {
+    const perPellet =
+      ((rawBulletDamage + totalFlatBaseDamage) * weaponDamageMultiplier + totalFlatWeaponDamage) *
+      damageAmplification;
+    const perShot = perPellet * hero.gun.pelletCount;
+    return {
+      label,
+      rawBulletDamage,
+      bulletDamage: perPellet,
+      rof: sustainedBulletsPerSecond,
+      perShot,
+      dps: perShot * sustainedBulletsPerSecond,
+      headshotDps: perShot * headshotMultiplier * sustainedBulletsPerSecond,
+    };
+  }
 
-  const rawDps = rawWeaponDps + rawAbilityDps;
-  const guardrailedDps = rawWeaponDps + guardrailedAbilityDps;
-
-  const burstWindowDamage = finalDamagePerBullet * fireRate * 3 + guardrailedAbilityDps * 3;
-  const ehpMultiplier = 1 / Math.max(resistances, 0.1);
-
-  const totalCost = sum(selectedItems, (item) => effectiveItemCost(item, selectedItems));
-
-  const assumptions = [
-    scenario.enableExperimentalDamageAmp ? "Experimental damage amplification enabled" : "Damage amplification disabled",
-    scenario.includeReloadCycle ? "Reload cycle included" : "Continuous firing assumption",
-    scenario.assumePerfectLineOfSight ? "Perfect line of sight" : "LOS interruptions modeled",
-    scenario.ignoreAnimationLocks ? "Animation locks ignored" : "Animation locks modeled",
+  const rows = [
+    computeRow("Base", baseBulletDamage),
+    computeRow("@Boon", boonBulletDamage),
+    computeRow("@MaxBoon", maxBoonBulletDamage),
   ];
+
+  const finalPerShotBase = rows[0].perShot;
+  const finalDpsBase = rows[0].dps;
+  const finalPerShotBoon = rows[1].perShot;
+  const finalDpsBoon = rows[1].dps;
+  const finalPerShotMaxBoon = rows[2].perShot;
+  const finalDpsMaxBoon = rows[2].dps;
+  const finalDpsHeadshotBase = rows[0].headshotDps;
+  const finalDpsHeadshotBoon = rows[1].headshotDps;
+  const finalDpsHeadshotMaxBoon = rows[2].headshotDps;
+
+  const totalCost = selectedItems.reduce((acc, item) => acc + item.baseCost, 0);
 
   return {
     hero,
-    enemy,
-    scenario,
     selectedItems,
     selectedTeamModifiers,
+    soulCountUsed,
+    weaponSoulInvestment,
+    gunInvestmentWeaponPct,
+    boonCount,
     totalCost,
-    budgetValid: totalCost <= build.soulBudget,
-    rawDps,
-    guardrailedDps,
-    burstWindowDamage,
-    ehpMultiplier,
-    assumptions,
+    activeConditionals,
+    rows,
+    finalPerShotBase,
+    finalPerShotBoon,
+    finalDpsBase,
+    finalDpsBoon,
+    finalPerShotMaxBoon,
+    finalDpsMaxBoon,
+    finalDpsHeadshotBase,
+    finalDpsHeadshotBoon,
+    finalDpsHeadshotMaxBoon,
+    bulletVelocityLabel: hero.gun.bulletVelocity === null ? "Not Available" : `${hero.gun.bulletVelocity}`,
     breakdown: {
-      baseDamage,
+      baseBulletDamage,
+      boonBulletDamage,
+      maxBoonBulletDamage,
       weaponDamageMultiplier,
-      flatBonus: totalFlatBonus,
-      falloff,
-      resistances,
-      critMultiplier,
+      weaponSoulInvestment,
+      gunInvestmentWeaponPct,
+      fireRateMultiplier,
+      clipMultiplier,
+      reloadMultiplier,
+      flatWeaponDamage: totalFlatWeaponDamage,
+      flatBaseDamage: totalFlatBaseDamage,
       damageAmplification,
-      finalDamagePerBullet,
     },
   };
 }

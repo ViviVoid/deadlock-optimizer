@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "sync:items": "python3 scripts/fetch_deadlock_items.py && node scripts/sync-data.mjs"
   },
   "dependencies": {
     "next": "16.2.4",
@@ -24,7 +25,6 @@
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.1.5"
   }
 }

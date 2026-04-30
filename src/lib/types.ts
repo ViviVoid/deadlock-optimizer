@@ -1,4 +1,4 @@
-﻿import { z } from "zod";
+import { z } from "zod";
 
 export const economyTierSchema = z.union([
   z.literal(800),
@@ -7,64 +7,60 @@ export const economyTierSchema = z.union([
   z.literal(6400),
 ]);
 export type EconomyTier = z.infer<typeof economyTierSchema>;
+export const itemCategorySchema = z.enum(["gun", "vitality", "spirit"]);
+export type ItemCategory = z.infer<typeof itemCategorySchema>;
+export const soulModeSchema = z.enum(["autoFromItems", "manual"]);
+export type SoulMode = z.infer<typeof soulModeSchema>;
 
-export const statBlockSchema = z.object({
-  baseDamage: z.number().nonnegative(),
-  fireRate: z.number().positive(),
-  magazineSize: z.number().positive(),
+export const gunStatSchema = z.object({
+  bulletDamageStart: z.number().nonnegative(),
+  bulletDamagePerBoon: z.number().nonnegative(),
+  bulletDamageMaxBoon: z.number().nonnegative(),
+  spiritScaling: z.number().nonnegative().default(0),
+  baseRof: z.number().positive(),
+  ammo: z.number().positive(),
+  clipSizePct: z.number().default(0),
   reloadTimeSec: z.number().nonnegative(),
-  headshotRatio: z.number().min(0).max(1).default(0.2),
-  critBonusScale: z.number().default(0),
-  canCrit: z.boolean().default(true),
-  falloffNearMeters: z.number().positive(),
-  falloffFarMeters: z.number().positive(),
-  flatWeaponDamage: z.number().default(0),
-});
-
-export const guardrailSchema = z.object({
-  castTimeMs: z.number().nonnegative().default(0),
-  recoveryTimeMs: z.number().nonnegative().default(0),
-  requiresLineOfSight: z.boolean().default(false),
-  maxMaintainedUptimePct: z.number().min(0).max(1).default(1),
-  tickIntervalMs: z.number().positive().default(1000),
-  retargetDelayMs: z.number().nonnegative().default(0),
-});
-
-export const abilitySchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  damagePerTick: z.number().nonnegative(),
-  activeDurationSec: z.number().nonnegative(),
-  cooldownSec: z.number().positive(),
-  guardrails: guardrailSchema,
+  reloadReductionPct: z.number().default(0),
+  pelletCount: z.number().positive().default(1),
+  bulletVelocity: z.number().nullable().default(null),
+  critBonusScalePct: z.number().default(0),
 });
 
 export const heroSchema = z.object({
   id: z.string(),
   name: z.string(),
-  stats: statBlockSchema,
-  boonsWeaponDamageMultiplier: z.number().nonnegative().default(1),
-  abilities: z.array(abilitySchema),
-  noCritException: z.boolean().default(false),
-  headshotTakenMultiplier: z.number().positive().default(1),
+  gun: gunStatSchema,
 });
 export type Hero = z.infer<typeof heroSchema>;
 
 export const itemEffectSchema = z.object({
   weaponDamagePct: z.number().default(0),
   fireRatePct: z.number().default(0),
+  clipSizePct: z.number().default(0),
+  reloadReductionPct: z.number().default(0),
+  bulletLifestealPct: z.number().default(0),
   flatWeaponDamage: z.number().default(0),
-  bulletResistReductionPct: z.number().default(0),
+  flatBaseDamage: z.number().default(0),
   damageAmplificationPct: z.number().default(0),
-  conditional: z.string().optional(),
+  description: z.string().default(""),
 });
 
 export const itemSchema = z.object({
   id: z.string(),
   name: z.string(),
+  category: itemCategorySchema,
   tier: economyTierSchema,
   baseCost: z.number().positive(),
   upgradesFrom: z.string().optional(),
+  conditionalId: z.string().optional(),
+  conditionalLabel: z.string().optional(),
+  /** Extra gun-relevant stats applied only when `conditionalId` is toggled on (innate stays in `effects`). */
+  conditionalEffects: itemEffectSchema.partial().optional(),
+  /** From cache: item with an activatable slot (shop “active” items). */
+  isActiveItem: z.boolean().default(false),
+  /** Derived: proc windows, important_properties, or ConditionallyApplied in source data. */
+  hasConditionalEffects: z.boolean().default(false),
   effects: itemEffectSchema,
 });
 export type Item = z.infer<typeof itemSchema>;
@@ -73,8 +69,6 @@ export const enemyProfileSchema = z.object({
   id: z.string(),
   name: z.string(),
   bulletResistPct: z.number().min(-0.95).max(0.95).default(0),
-  critResistMultiplier: z.number().positive().default(1),
-  headshotTakenMultiplier: z.number().positive().default(1),
 });
 export type EnemyProfile = z.infer<typeof enemyProfileSchema>;
 
@@ -84,28 +78,38 @@ export const teamModifierSchema = z.object({
   enabled: z.boolean().default(false),
   weaponDamagePct: z.number().default(0),
   damageAmplificationPct: z.number().default(0),
-  bulletResistReductionPct: z.number().default(0),
+  fireRatePct: z.number().default(0),
+  reloadReductionPct: z.number().default(0),
 });
 export type TeamModifier = z.infer<typeof teamModifierSchema>;
 
 export const scenarioSchema = z.object({
   id: z.string(),
   name: z.string(),
-  distanceMeters: z.number().nonnegative(),
   includeReloadCycle: z.boolean().default(true),
-  continuousFireAssumption: z.boolean().default(false),
-  ignoreAnimationLocks: z.boolean().default(false),
-  assumePerfectLineOfSight: z.boolean().default(false),
-  useObservedTickRate: z.boolean().default(true),
-  sustainedDurationSec: z.number().positive().default(20),
-  enableExperimentalDamageAmp: z.boolean().default(false),
 });
 export type Scenario = z.infer<typeof scenarioSchema>;
+
+export const boonBreakpointSchema = z.object({
+  souls: z.number().int().nonnegative(),
+  boons: z.number().int().nonnegative(),
+});
+export type BoonBreakpoint = z.infer<typeof boonBreakpointSchema>;
+
+/** Souls spent in the weapon shop track; highest tier at or below investment applies (wiki Weapon Damage). */
+export const weaponInvestmentBreakpointSchema = z.object({
+  souls: z.number().int().nonnegative(),
+  /** Fraction, e.g. 0.07 for +7% */
+  weaponDamagePct: z.number().nonnegative(),
+});
+export type WeaponInvestmentBreakpoint = z.infer<typeof weaponInvestmentBreakpointSchema>;
 
 export const buildSchema = z.object({
   heroId: z.string(),
   itemIds: z.array(z.string()),
-  soulBudget: z.number().positive(),
+  soulMode: soulModeSchema.default("autoFromItems"),
+  soulCount: z.number().int().nonnegative().default(900),
+  conditionalStates: z.record(z.string(), z.boolean()).default({}),
   scenarioId: z.string(),
   enemyId: z.string(),
   teamModifierIds: z.array(z.string()),
@@ -119,5 +123,7 @@ export const datasetSchema = z.object({
   enemies: z.array(enemyProfileSchema),
   teamModifiers: z.array(teamModifierSchema),
   scenarios: z.array(scenarioSchema),
+  boonBreakpoints: z.array(boonBreakpointSchema),
+  weaponInvestmentBreakpoints: z.array(weaponInvestmentBreakpointSchema),
 });
 export type Dataset = z.infer<typeof datasetSchema>;

@@ -1,98 +1,277 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { sampleDataset } from "@/lib/data/sampleDataset";
 import { evaluateBuild } from "@/lib/engine";
-import { marginalContributions, orderAveragedContributions } from "@/lib/contributions";
-import { optimizeBuilds, type OptimizerObjective } from "@/lib/optimizer";
 import { exportState, importState, loadState, saveState, type PersistedState } from "@/lib/storage";
-import type { BuildConfig } from "@/lib/types";
+import type { BuildConfig, Item } from "@/lib/types";
 
 const defaultBuild: BuildConfig = {
-  heroId: "geist",
-  itemIds: ["close_quarters", "rapid_fire_rounds"],
-  soulBudget: 6400,
-  scenarioId: "sustained",
+  heroId: "lady_geist",
+  itemIds: ["close_quarters"],
+  soulMode: "autoFromItems",
+  soulCount: 900,
+  conditionalStates: {},
+  scenarioId: "base",
   enemyId: "default_enemy",
   teamModifierIds: [],
 };
 
-function cloneBuild(build: BuildConfig): BuildConfig {
-  return {
-    ...build,
-    itemIds: [...build.itemIds],
-    teamModifierIds: [...build.teamModifierIds],
-  };
+function formatPctFrac(frac: number): string {
+  if (!frac) return "";
+  const pct = frac * 100;
+  return `${pct % 1 === 0 ? pct.toFixed(0) : pct.toFixed(1)}%`;
+}
+
+function summarizeEffects(e: Partial<Item["effects"]>): string[] {
+  const parts: string[] = [];
+  if (e.weaponDamagePct) parts.push(`Wpn ${formatPctFrac(e.weaponDamagePct)}`);
+  if (e.fireRatePct) parts.push(`RoF ${formatPctFrac(e.fireRatePct)}`);
+  if (e.clipSizePct) parts.push(`Clip ${formatPctFrac(e.clipSizePct)}`);
+  if (e.reloadReductionPct) parts.push(`Reload −${formatPctFrac(e.reloadReductionPct)}`);
+  if (e.bulletLifestealPct) parts.push(`BL ${formatPctFrac(e.bulletLifestealPct)}`);
+  if (e.flatWeaponDamage) parts.push(`Flat+wpn ${e.flatWeaponDamage}`);
+  if (e.flatBaseDamage) parts.push(`Flat+base ${e.flatBaseDamage}`);
+  if (e.damageAmplificationPct) parts.push(`Amp ${formatPctFrac(e.damageAmplificationPct)}`);
+  return parts;
+}
+
+function itemStatTitle(item: Item): string {
+  const innate = summarizeEffects(item.effects).join(" · ") || "—";
+  const bonus = item.conditionalEffects ? summarizeEffects(item.conditionalEffects).join(" · ") : "";
+  const desc = item.effects.description ? `\n\n${item.effects.description}` : "";
+  if (bonus) return `Always: ${innate}\nWhen toggled on: ${bonus}${desc}`;
+  return `${innate}${desc}`;
+}
+
+function ItemFlags({ item }: { item: Item }) {
+  return (
+    <span className="mt-0.5 flex flex-wrap gap-1">
+      {item.isActiveItem ? (
+        <span className="rounded bg-amber-950/80 px-1 text-[10px] text-amber-200">Active</span>
+      ) : null}
+      {item.hasConditionalEffects ? (
+        <span className="rounded bg-violet-950/80 px-1 text-[10px] text-violet-200">Conditional</span>
+      ) : null}
+    </span>
+  );
 }
 
 export default function Home() {
-  const [activeBuild, setActiveBuild] = useState<BuildConfig>(() => {
-    const persisted = loadState();
-    return persisted ? persisted.activeBuild : defaultBuild;
-  });
-  const [compareBuild, setCompareBuild] = useState<BuildConfig>(() => {
-    const persisted = loadState();
-    return persisted
-      ? persisted.compareBuild
-      : {
-          ...defaultBuild,
-          itemIds: ["close_quarters"],
-        };
-  });
-  const [objective, setObjective] = useState<OptimizerObjective>("SustainedDPS");
+  const [activeBuild, setActiveBuild] = useState<BuildConfig>(defaultBuild);
+  const [compareBuild, setCompareBuild] = useState<BuildConfig>(defaultBuild);
+  const [storageReady, setStorageReady] = useState(false);
   const [importText, setImportText] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [heroPickerOpen, setHeroPickerOpen] = useState(false);
+  const [heroQuery, setHeroQuery] = useState("");
+  const [shopOpen, setShopOpen] = useState(false);
+  const [shopTab, setShopTab] = useState<"gun" | "vitality" | "spirit">("gun");
 
   useEffect(() => {
+    queueMicrotask(() => {
+      const persisted = loadState();
+      if (persisted) {
+        setActiveBuild(persisted.activeBuild);
+        setCompareBuild(persisted.compareBuild);
+      }
+      setStorageReady(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady) return;
     const payload: PersistedState = { activeBuild, compareBuild };
     saveState(payload);
-  }, [activeBuild, compareBuild]);
+  }, [activeBuild, compareBuild, storageReady]);
 
   const result = useMemo(() => evaluateBuild(sampleDataset, activeBuild), [activeBuild]);
   const compareResult = useMemo(() => evaluateBuild(sampleDataset, compareBuild), [compareBuild]);
-
-  const marginal = useMemo(
-    () => marginalContributions(sampleDataset, activeBuild),
-    [activeBuild]
-  );
-  const orderAvg = useMemo(
-    () => orderAveragedContributions(sampleDataset, activeBuild),
-    [activeBuild]
+  const exportJson = useMemo(() => exportState({ activeBuild, compareBuild }), [activeBuild, compareBuild]);
+  const activeHero = useMemo(
+    () => sampleDataset.heroes.find((h) => h.id === activeBuild.heroId) ?? sampleDataset.heroes[0],
+    [activeBuild.heroId]
   );
 
-  const recommendations = useMemo(
-    () => optimizeBuilds({ dataset: sampleDataset, baseBuild: activeBuild, objective }),
-    [activeBuild, objective]
+  const filteredHeroes = useMemo(
+    () =>
+      sampleDataset.heroes.filter((hero) =>
+        hero.name.toLowerCase().includes(heroQuery.trim().toLowerCase())
+      ),
+    [heroQuery]
   );
 
-  const exportJson = useMemo(
-    () => exportState({ activeBuild, compareBuild }),
-    [activeBuild, compareBuild]
+  const conditionalItems = useMemo(
+    () =>
+      sampleDataset.items.filter(
+        (item) => item.conditionalId && activeBuild.itemIds.includes(item.id)
+      ),
+    [activeBuild.itemIds]
   );
 
-  const updateBuild = (next: Partial<BuildConfig>, target: "active" | "compare") => {
-    if (target === "active") setActiveBuild((prev) => ({ ...prev, ...next }));
-    else setCompareBuild((prev) => ({ ...prev, ...next }));
+  const addItem = (itemId: string) => {
+    const item = sampleDataset.items.find((entry) => entry.id === itemId);
+    if (!item || activeBuild.itemIds.includes(item.id) || activeBuild.itemIds.length >= 12) return;
+
+    let next = [...activeBuild.itemIds];
+    if (item.upgradesFrom) {
+      next = next.filter((id) => id !== item.upgradesFrom);
+    }
+    const replacedByUpgrade = sampleDataset.items.filter((candidate) => candidate.upgradesFrom === item.id);
+    if (replacedByUpgrade.length > 0) {
+      const replacedIds = new Set(replacedByUpgrade.map((candidate) => candidate.id));
+      next = next.filter((id) => !replacedIds.has(id));
+    }
+    next.push(item.id);
+    setActiveBuild((prev) => ({ ...prev, itemIds: next }));
   };
+
+  const removeItem = (itemId: string) => {
+    setActiveBuild((prev) => ({
+      ...prev,
+      itemIds: prev.itemIds.filter((id) => id !== itemId),
+    }));
+  };
+
+  const toggleConditional = (conditionalId: string) => {
+    setActiveBuild((prev) => ({
+      ...prev,
+      conditionalStates: {
+        ...prev.conditionalStates,
+        [conditionalId]: !prev.conditionalStates[conditionalId],
+      },
+    }));
+  };
+
+  const cloneBuild = (build: BuildConfig): BuildConfig => ({
+    ...build,
+    itemIds: [...build.itemIds],
+    conditionalStates: { ...build.conditionalStates },
+    teamModifierIds: [...build.teamModifierIds],
+  });
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 p-6">
-      <div className="mx-auto max-w-7xl space-y-6">
+      <div className="mx-auto max-w-7xl space-y-5">
         <header>
           <h1 className="text-3xl font-bold">Deadlock Optimizer MVP</h1>
-          <p className="text-slate-300 mt-2">
-            Gun damage, guardrailed sustained combat, budget-constrained optimization, and item contribution analysis.
-          </p>
+          <p className="text-slate-300 mt-2">Gun-only calculator with boon-aware table outputs.</p>
         </header>
 
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <Panel title="Build">
-            <BuildControls build={activeBuild} setBuild={(n) => updateBuild(n, "active")} />
+        <section className="grid gap-4 xl:grid-cols-3">
+          <Panel title="Hero & Souls">
+            <button
+              className="rounded bg-indigo-700 px-3 py-2 text-sm font-semibold"
+              type="button"
+              onClick={() => setHeroPickerOpen((open) => !open)}
+            >
+              Select Hero: {activeHero?.name ?? "—"}
+            </button>
+            {heroPickerOpen ? (
+              <div className="space-y-2 rounded border border-slate-800 bg-slate-950 p-2">
+                <input
+                  className="w-full rounded bg-slate-900 p-2 text-sm"
+                  placeholder="Search hero..."
+                  value={heroQuery}
+                  onChange={(e) => setHeroQuery(e.target.value)}
+                />
+                <HeroGrid
+                  heroes={filteredHeroes}
+                  activeHeroId={activeBuild.heroId}
+                  onSelect={(heroId) => {
+                    setActiveBuild((prev) => ({ ...prev, heroId }));
+                    setHeroPickerOpen(false);
+                  }}
+                />
+              </div>
+            ) : null}
+            <div className="rounded border border-slate-800 p-2 text-sm">
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={activeBuild.soulMode === "autoFromItems"}
+                  onChange={(e) =>
+                    setActiveBuild((prev) => ({
+                      ...prev,
+                      soulMode: e.target.checked ? "autoFromItems" : "manual",
+                    }))
+                  }
+                />
+                Souls based off built items
+              </label>
+              <p className="mt-2 text-xs text-slate-300">Effective Souls: {result.soulCountUsed}</p>
+            </div>
+            <input
+              className="w-full rounded bg-slate-900 p-2 text-sm"
+              type="number"
+              value={activeBuild.soulCount}
+              onChange={(e) =>
+                setActiveBuild((prev) => ({ ...prev, soulCount: Number(e.target.value) }))
+              }
+              disabled={activeBuild.soulMode === "autoFromItems"}
+            />
+            <label className="block text-sm">RoF model</label>
+            <select
+              className="w-full rounded bg-slate-900 p-2 text-sm"
+              value={activeBuild.scenarioId}
+              onChange={(e) =>
+                setActiveBuild((prev) => ({ ...prev, scenarioId: e.target.value }))
+              }
+            >
+              {sampleDataset.scenarios.map((scenario) => (
+                <option key={scenario.id} value={scenario.id}>
+                  {scenario.name}
+                </option>
+              ))}
+            </select>
           </Panel>
-          <Panel title="Context">
-            <ContextControls build={activeBuild} setBuild={(n) => updateBuild(n, "active")} />
+          <Panel title="Built Items (6 x 2)">
+            <ItemSlots build={activeBuild} onRemove={removeItem} />
+            <button
+              className="rounded bg-emerald-700 px-3 py-2 text-xs font-semibold"
+              type="button"
+              onClick={() => setShopOpen((open) => !open)}
+            >
+              {shopOpen ? "Close Shop" : "Add Item"}
+            </button>
+            {shopOpen ? (
+              <ShopMenu
+                tab={shopTab}
+                setTab={setShopTab}
+                activeIds={activeBuild.itemIds}
+                onAdd={addItem}
+              />
+            ) : null}
           </Panel>
-          <Panel title="Compare Build">
-            <BuildControls build={compareBuild} setBuild={(n) => updateBuild(n, "compare")} />
+          <Panel title="Conditionals">
+            {conditionalItems.length === 0 ? (
+              <p className="text-xs text-slate-300">No conditional items currently built.</p>
+            ) : (
+              <div className="space-y-2">
+                {conditionalItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`w-full rounded border px-3 py-2 text-left text-xs ${
+                      item.conditionalId && activeBuild.conditionalStates[item.conditionalId]
+                        ? "border-emerald-500 bg-emerald-950/20"
+                        : "border-slate-700 bg-slate-900"
+                    }`}
+                    onClick={() => item.conditionalId && toggleConditional(item.conditionalId)}
+                  >
+                    <p className="font-semibold">{item.name}</p>
+                    <ItemFlags item={item} />
+                    <p className="text-slate-300">{item.conditionalLabel ?? "Conditional active"}</p>
+                    <p className="text-[10px] text-slate-400">
+                      {summarizeEffects(item.effects).join(" · ") || "—"}
+                      {item.conditionalEffects && Object.keys(item.conditionalEffects).length > 0
+                        ? ` · (+${summarizeEffects(item.conditionalEffects).join(" · ")} when on)`
+                        : ""}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            )}
           </Panel>
           <Panel title="Data">
             <p className="text-sm text-slate-300">Dataset version: {sampleDataset.version}</p>
@@ -115,76 +294,51 @@ export default function Home() {
               onClick={() => {
                 try {
                   const imported = importState(importText);
-                  setActiveBuild(cloneBuild(imported.activeBuild));
-                  setCompareBuild(cloneBuild(imported.compareBuild));
+                  setActiveBuild(imported.activeBuild);
+                  setCompareBuild(imported.compareBuild);
                   setImportText("");
+                  setImportError(null);
                 } catch {
-                  alert("Invalid import JSON");
+                  setImportError("Invalid import JSON. Check schema and try again.");
                 }
               }}
             >
               Import JSON
             </button>
-          </Panel>
-        </section>
-
-        <section className="grid gap-4 lg:grid-cols-3">
-          <Panel title="Results">
-            <Metric label="Damage / Bullet" value={result.breakdown.finalDamagePerBullet} />
-            <Metric label="Raw DPS" value={result.rawDps} />
-            <Metric label="Guardrailed DPS" value={result.guardrailedDps} />
-            <Metric label="Burst Window (3s)" value={result.burstWindowDamage} />
-            <Metric label="EHP Multiplier" value={result.ehpMultiplier} />
-            <p className="mt-3 text-xs text-amber-300">{result.breakdown.damageAmplification > 1 ? "Experimental damage amplification is enabled." : "Damage amplification is disabled for stability."}</p>
-            <ul className="mt-2 list-disc pl-5 text-xs text-slate-300">
-              {result.assumptions.map((a) => (
-                <li key={a}>{a}</li>
-              ))}
-            </ul>
-          </Panel>
-
-          <Panel title="Delta vs Compare">
-            <Metric label="DPS Delta" value={result.guardrailedDps - compareResult.guardrailedDps} />
-            <Metric label="Burst Delta" value={result.burstWindowDamage - compareResult.burstWindowDamage} />
-            <Metric label="Per Bullet Delta" value={result.breakdown.finalDamagePerBullet - compareResult.breakdown.finalDamagePerBullet} />
-            <p className="mt-2 text-xs text-slate-300">
-              Active cost: {result.totalCost} / {activeBuild.soulBudget} souls ({result.budgetValid ? "valid" : "over budget"})
-            </p>
-            <p className="text-xs text-slate-300">
-              Compare cost: {compareResult.totalCost} / {compareBuild.soulBudget} souls ({compareResult.budgetValid ? "valid" : "over budget"})
-            </p>
-          </Panel>
-
-          <Panel title="Optimizer">
-            <label className="text-sm">Objective</label>
-            <select
-              className="mt-1 w-full rounded bg-slate-900 p-2 text-sm"
-              value={objective}
-              onChange={(e) => setObjective(e.target.value as OptimizerObjective)}
-            >
-              <option>SustainedDPS</option>
-              <option>BurstDamage</option>
-              <option>EHP</option>
-            </select>
-            <ul className="mt-3 space-y-2 text-xs">
-              {recommendations.map((rec, i) => (
-                <li key={`${rec.build.itemIds.join("-")}-${i}`} className="rounded bg-slate-900 p-2">
-                  <p>#{i + 1} score: {rec.score.toFixed(2)}</p>
-                  <p>cost: {rec.rationale.totalCost} / {rec.rationale.budget}</p>
-                  <p>items: {rec.build.itemIds.join(", ") || "none"}</p>
-                  <p>upgrade paths: {rec.rationale.upgradeChains.join(" | ") || "none"}</p>
-                </li>
-              ))}
-            </ul>
+            {importError ? <p className="mt-2 text-xs text-rose-300">{importError}</p> : null}
           </Panel>
         </section>
 
         <section className="grid gap-4 lg:grid-cols-2">
-          <Panel title="Item Contribution (Marginal)">
-            <ContributionTable rows={marginal} />
+          <Panel title="Results">
+            <ResultsTable result={result} />
+            <p className="mt-2 text-xs text-slate-300">Bullet Velocity: {result.bulletVelocityLabel}</p>
           </Panel>
-          <Panel title="Item Contribution (Order-Averaged)">
-            <ContributionTable rows={orderAvg} />
+          <Panel title="Delta vs Saved Baseline">
+            <DeltaTable active={result} baseline={compareResult} />
+            <button
+              className="mt-2 w-full rounded bg-emerald-700 px-3 py-2 text-xs font-semibold"
+              type="button"
+              onClick={() => setCompareBuild(cloneBuild(activeBuild))}
+            >
+              Save Active to Baseline
+            </button>
+          </Panel>
+          <Panel title="Build Summary">
+            <Metric label="Built Item Souls" value={result.totalCost} />
+            <Metric label="Effective Souls" value={result.soulCountUsed} />
+            <Metric label="Boon Count" value={result.boonCount} />
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-300">Weapon slot souls (investment)</span>
+              <span className="font-mono">{result.weaponSoulInvestment}</span>
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-300">Gun shop weapon damage</span>
+              <span className="font-mono">+{(result.gunInvestmentWeaponPct * 100).toFixed(0)}%</span>
+            </div>
+            <p className="text-xs text-slate-300">
+              Active conditionals: {result.activeConditionals.length > 0 ? result.activeConditionals.join(", ") : "none"}
+            </p>
           </Panel>
         </section>
       </div>
@@ -210,110 +364,227 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function BuildControls({
-  build,
-  setBuild,
+function HeroGrid({
+  heroes,
+  activeHeroId,
+  onSelect,
 }: {
-  build: BuildConfig;
-  setBuild: (next: Partial<BuildConfig>) => void;
+  heroes: typeof sampleDataset.heroes;
+  activeHeroId: string;
+  onSelect: (heroId: string) => void;
 }) {
   return (
-    <>
-      <label className="block text-sm">Hero</label>
-      <select className="w-full rounded bg-slate-900 p-2 text-sm" value={build.heroId} onChange={(e) => setBuild({ heroId: e.target.value })}>
-        {sampleDataset.heroes.map((hero) => (
-          <option key={hero.id} value={hero.id}>{hero.name}</option>
-        ))}
-      </select>
-
-      <label className="block text-sm">Items</label>
-      <select
-        multiple
-        className="h-32 w-full rounded bg-slate-900 p-2 text-sm"
-        value={build.itemIds}
-        onChange={(e) => {
-          const ids = Array.from(e.target.selectedOptions).map((o) => o.value);
-          setBuild({ itemIds: ids });
-        }}
-      >
-        {sampleDataset.items.map((item) => (
-          <option key={item.id} value={item.id}>
-            {item.name} ({item.baseCost})
-          </option>
-        ))}
-      </select>
-
-      <label className="block text-sm">Soul Budget</label>
-      <input
-        className="w-full rounded bg-slate-900 p-2 text-sm"
-        type="number"
-        value={build.soulBudget}
-        onChange={(e) => setBuild({ soulBudget: Number(e.target.value) })}
-      />
-    </>
-  );
-}
-
-function ContextControls({
-  build,
-  setBuild,
-}: {
-  build: BuildConfig;
-  setBuild: (next: Partial<BuildConfig>) => void;
-}) {
-  return (
-    <>
-      <label className="block text-sm">Enemy</label>
-      <select className="w-full rounded bg-slate-900 p-2 text-sm" value={build.enemyId} onChange={(e) => setBuild({ enemyId: e.target.value })}>
-        {sampleDataset.enemies.map((enemy) => (
-          <option key={enemy.id} value={enemy.id}>{enemy.name}</option>
-        ))}
-      </select>
-
-      <label className="block text-sm">Scenario</label>
-      <select className="w-full rounded bg-slate-900 p-2 text-sm" value={build.scenarioId} onChange={(e) => setBuild({ scenarioId: e.target.value })}>
-        {sampleDataset.scenarios.map((scenario) => (
-          <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
-        ))}
-      </select>
-
-      <label className="block text-sm">Team Modifiers</label>
-      <select
-        multiple
-        className="h-24 w-full rounded bg-slate-900 p-2 text-sm"
-        value={build.teamModifierIds}
-        onChange={(e) => {
-          const ids = Array.from(e.target.selectedOptions).map((o) => o.value);
-          setBuild({ teamModifierIds: ids });
-        }}
-      >
-        {sampleDataset.teamModifiers.map((tm) => (
-          <option key={tm.id} value={tm.id}>{tm.name}</option>
-        ))}
-      </select>
-    </>
-  );
-}
-
-function ContributionTable({
-  rows,
-}: {
-  rows: Array<{ itemId: string; absoluteDelta: number; percentageDelta: number }>;
-}) {
-  return (
-    <div className="space-y-1 text-xs">
-      {rows.map((row) => {
-        const item = sampleDataset.items.find((i) => i.id === row.itemId);
-        return (
-          <div key={row.itemId} className="flex items-center justify-between rounded bg-slate-900 p-2">
-            <span>{item?.name ?? row.itemId}</span>
-            <span className="font-mono">+{row.absoluteDelta.toFixed(2)} ({(row.percentageDelta * 100).toFixed(1)}%)</span>
+    <div className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto pr-1 lg:grid-cols-3">
+      {heroes.map((hero) => (
+        <button
+          key={hero.id}
+          type="button"
+          className={`rounded border p-2 text-left text-xs ${
+            activeHeroId === hero.id ? "border-indigo-500 bg-indigo-950/50" : "border-slate-700 bg-slate-900"
+          }`}
+          onClick={() => onSelect(hero.id)}
+        >
+          <div className="mb-2 h-14 rounded bg-slate-800 text-[10px] text-slate-400 grid place-items-center">
+            image placeholder
           </div>
+          <p className="font-semibold">{hero.name}</p>
+          <p className="text-slate-300">Base DPS {(hero.gun.bulletDamageStart * hero.gun.baseRof * hero.gun.pelletCount).toFixed(2)}</p>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ItemSlots({
+  build,
+  onRemove,
+}: {
+  build: BuildConfig;
+  onRemove: (itemId: string) => void;
+}) {
+  const slots = Array.from({ length: 12 }, (_, idx) => build.itemIds[idx] ?? null);
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {slots.map((itemId, idx) => {
+        const item = sampleDataset.items.find((entry) => entry.id === itemId);
+        return (
+          <button
+            key={`${itemId ?? "empty"}-${idx}`}
+            type="button"
+            className={`min-h-14 rounded border p-2 text-left text-xs ${
+              item ? "border-emerald-700 bg-slate-900" : "border-slate-800 bg-slate-950 text-slate-400"
+            }`}
+            title={item ? itemStatTitle(item) : "Empty slot"}
+            onClick={() => {
+              if (!itemId) return;
+              onRemove(itemId);
+            }}
+          >
+            {item ? (
+              <>
+                <p className="font-semibold">{item.name}</p>
+                <ItemFlags item={item} />
+                <p className="text-[10px] text-slate-400">
+                  {summarizeEffects(item.effects).join(" · ") || "—"}
+                  {item.conditionalEffects && Object.keys(item.conditionalEffects).length > 0
+                    ? ` · (+${summarizeEffects(item.conditionalEffects).join(" · ")} when on)`
+                    : ""}
+                </p>
+              </>
+            ) : (
+              <p>Empty Slot</p>
+            )}
+          </button>
         );
       })}
-      <p className="pt-2 text-[11px] text-slate-400">
-        Attribution caveat: interacting item effects can make isolated contribution estimates non-linear.
-      </p>
     </div>
+  );
+}
+
+function ShopMenu({
+  tab,
+  setTab,
+  activeIds,
+  onAdd,
+}: {
+  tab: "gun" | "vitality" | "spirit";
+  setTab: (tab: "gun" | "vitality" | "spirit") => void;
+  activeIds: string[];
+  onAdd: (itemId: string) => void;
+}) {
+  const tiers: Array<800 | 1600 | 3200 | 6400> = [800, 1600, 3200, 6400];
+  return (
+    <div className="space-y-2 rounded border border-slate-800 p-2">
+      <div className="flex gap-2">
+        {(["gun", "vitality", "spirit"] as const).map((candidate) => (
+          <button
+            key={candidate}
+            type="button"
+            className={`rounded px-3 py-1 text-xs ${tab === candidate ? "bg-indigo-700" : "bg-slate-800"}`}
+            onClick={() => setTab(candidate)}
+          >
+            {candidate}
+          </button>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {tiers.map((tier) => (
+          <div key={tier} className="rounded border border-slate-800 p-2">
+            <p className="mb-2 text-xs font-semibold">{tier}</p>
+            <div className="space-y-1">
+              {sampleDataset.items
+                .filter((item) => item.category === tab && item.tier === tier)
+                .map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    title={itemStatTitle(item)}
+                    className={`w-full rounded px-2 py-1 text-left text-xs ${
+                      activeIds.includes(item.id) ? "bg-emerald-900/40 text-emerald-200" : "bg-slate-900"
+                    }`}
+                    onClick={() => onAdd(item.id)}
+                  >
+                    <span className="block font-medium">{item.name}</span>
+                    <ItemFlags item={item} />
+                    <span className="block text-[10px] text-slate-400">
+                      {summarizeEffects(item.effects).join(" · ") || "—"}
+                    </span>
+                    {item.conditionalEffects && Object.keys(item.conditionalEffects).length > 0 ? (
+                      <span className="block text-[10px] text-violet-300/90">
+                        +{summarizeEffects(item.conditionalEffects).join(" · ")} (toggle)
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ResultsTable({ result }: { result: ReturnType<typeof evaluateBuild> }) {
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-slate-300">
+          <th className="text-left py-1">Metric</th>
+          {result.rows.map((row) => (
+            <th key={row.label} className="text-right py-1">
+              {row.label}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {[
+          {
+            label: "Per pellet",
+            title:
+              "Per pellet after weapon damage % (item bonuses + gun shop souls in weapon slots), flat adds, and damage amp. Same multiplier for Base, @Boon, and @MaxBoon (hero bullet tier differs).",
+            pick: (row: (typeof result.rows)[number]) => row.bulletDamage,
+          },
+          { label: "RoF", pick: (row: (typeof result.rows)[number]) => row.rof },
+          { label: "Per Shot", pick: (row: (typeof result.rows)[number]) => row.perShot },
+          { label: "DPS", pick: (row: (typeof result.rows)[number]) => row.dps },
+          { label: "Headshot DPS", pick: (row: (typeof result.rows)[number]) => row.headshotDps },
+        ].map((metric) => (
+          <tr key={metric.label} className="border-t border-slate-800">
+            <td className="py-1" title={"title" in metric ? metric.title : undefined}>
+              {metric.label}
+            </td>
+            {result.rows.map((row) => (
+              <td key={`${metric.label}-${row.label}`} className="py-1 text-right font-mono">
+                {metric.pick(row).toFixed(2)}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function DeltaTable({
+  active,
+  baseline,
+}: {
+  active: ReturnType<typeof evaluateBuild>;
+  baseline: ReturnType<typeof evaluateBuild>;
+}) {
+  const [baseRow, boonRow, maxRow] = active.rows;
+  const [bBaseRow, bBoonRow, bMaxRow] = baseline.rows;
+
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-slate-300">
+          <th className="text-left py-1">Delta</th>
+          <th className="text-right py-1">Base</th>
+          <th className="text-right py-1">@Boon</th>
+          <th className="text-right py-1">@MaxBoon</th>
+        </tr>
+      </thead>
+      <tbody>
+        {[
+          {
+            label: "DPS Delta",
+            pick: (r: (typeof active.rows)[number]) => r.dps,
+          },
+          {
+            label: "Headshot DPS Delta",
+            pick: (r: (typeof active.rows)[number]) => r.headshotDps,
+          },
+        ].map((metric) => (
+          <tr key={metric.label} className="border-t border-slate-800">
+            <td className="py-1">{metric.label}</td>
+            <td className="py-1 text-right font-mono">{(metric.pick(baseRow) - metric.pick(bBaseRow)).toFixed(2)}</td>
+            <td className="py-1 text-right font-mono">{(metric.pick(boonRow) - metric.pick(bBoonRow)).toFixed(2)}</td>
+            <td className="py-1 text-right font-mono">{(metric.pick(maxRow) - metric.pick(bMaxRow)).toFixed(2)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
