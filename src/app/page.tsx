@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { sampleDataset } from "@/lib/data/sampleDataset";
-import { evaluateBuild } from "@/lib/engine";
+import { evaluateBuild, gunInvestmentWeaponDamagePct } from "@/lib/engine";
 import { exportState, importState, loadState, saveState, type PersistedState } from "@/lib/storage";
 import type { BuildConfig, Item } from "@/lib/types";
 
@@ -57,6 +57,22 @@ function ItemFlags({ item }: { item: Item }) {
   );
 }
 
+type ItemEffects = Item["effects"];
+
+function emptyEffects(): ItemEffects {
+  return {
+    weaponDamagePct: 0,
+    fireRatePct: 0,
+    clipSizePct: 0,
+    reloadReductionPct: 0,
+    bulletLifestealPct: 0,
+    flatWeaponDamage: 0,
+    flatBaseDamage: 0,
+    damageAmplificationPct: 0,
+    description: "",
+  };
+}
+
 export default function Home() {
   const [activeBuild, setActiveBuild] = useState<BuildConfig>(defaultBuild);
   const [compareBuild, setCompareBuild] = useState<BuildConfig>(defaultBuild);
@@ -108,6 +124,33 @@ export default function Home() {
       ),
     [activeBuild.itemIds]
   );
+  const selectedItems = useMemo(
+    () =>
+      activeBuild.itemIds
+        .map((id) => sampleDataset.items.find((item) => item.id === id))
+        .filter((item): item is Item => Boolean(item)),
+    [activeBuild.itemIds]
+  );
+  const categorySoulInvestment = useMemo(() => {
+    const totals: Record<"gun" | "vitality" | "spirit", number> = { gun: 0, vitality: 0, spirit: 0 };
+    for (const item of selectedItems) totals[item.category] += item.baseCost;
+    return totals;
+  }, [selectedItems]);
+  const gunItemNetEffects = useMemo(() => {
+    const totals = emptyEffects();
+    for (const item of selectedItems) {
+      if (item.category !== "gun") continue;
+      totals.weaponDamagePct += item.effects.weaponDamagePct;
+      totals.fireRatePct += item.effects.fireRatePct;
+      totals.clipSizePct += item.effects.clipSizePct;
+      totals.reloadReductionPct += item.effects.reloadReductionPct;
+      totals.bulletLifestealPct += item.effects.bulletLifestealPct;
+      totals.flatWeaponDamage += item.effects.flatWeaponDamage;
+      totals.flatBaseDamage += item.effects.flatBaseDamage;
+      totals.damageAmplificationPct += item.effects.damageAmplificationPct;
+    }
+    return totals;
+  }, [selectedItems]);
 
   const addItem = (itemId: string) => {
     const item = sampleDataset.items.find((entry) => entry.id === itemId);
@@ -232,16 +275,8 @@ export default function Home() {
               type="button"
               onClick={() => setShopOpen((open) => !open)}
             >
-              {shopOpen ? "Close Shop" : "Add Item"}
+              {shopOpen ? "Close Shop Popup" : "Open Shop Popup"}
             </button>
-            {shopOpen ? (
-              <ShopMenu
-                tab={shopTab}
-                setTab={setShopTab}
-                activeIds={activeBuild.itemIds}
-                onAdd={addItem}
-              />
-            ) : null}
           </Panel>
           <Panel title="Conditionals">
             {conditionalItems.length === 0 ? (
@@ -341,6 +376,19 @@ export default function Home() {
             </p>
           </Panel>
         </section>
+        {shopOpen ? (
+          <ShopOverlay
+            tab={shopTab}
+            setTab={setShopTab}
+            activeIds={activeBuild.itemIds}
+            build={activeBuild}
+            onAdd={addItem}
+            onRemove={removeItem}
+            onClose={() => setShopOpen(false)}
+            categorySoulInvestment={categorySoulInvestment}
+            gunItemNetEffects={gunItemNetEffects}
+          />
+        ) : null}
       </div>
     </main>
   );
@@ -499,6 +547,86 @@ function ShopMenu({
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ShopOverlay({
+  tab,
+  setTab,
+  activeIds,
+  build,
+  onAdd,
+  onRemove,
+  onClose,
+  categorySoulInvestment,
+  gunItemNetEffects,
+}: {
+  tab: "gun" | "vitality" | "spirit";
+  setTab: (tab: "gun" | "vitality" | "spirit") => void;
+  activeIds: string[];
+  build: BuildConfig;
+  onAdd: (itemId: string) => void;
+  onRemove: (itemId: string) => void;
+  onClose: () => void;
+  categorySoulInvestment: Record<"gun" | "vitality" | "spirit", number>;
+  gunItemNetEffects: ItemEffects;
+}) {
+  const gunInvestmentPct = gunInvestmentWeaponDamagePct(sampleDataset, categorySoulInvestment.gun);
+  const vitalityInvestmentPct = gunInvestmentWeaponDamagePct(sampleDataset, categorySoulInvestment.vitality);
+  const spiritInvestmentPct = gunInvestmentWeaponDamagePct(sampleDataset, categorySoulInvestment.spirit);
+  const gunEffectSummary = summarizeEffects(gunItemNetEffects);
+
+  return (
+    <div className="fixed inset-0 z-40 bg-slate-950/80 p-4 backdrop-blur-sm">
+      <div className="mx-auto grid h-[88vh] max-w-7xl grid-cols-1 gap-3 rounded-lg border border-slate-700 bg-slate-900 p-3 lg:grid-cols-[280px_1fr_340px]">
+        <div className="space-y-2 overflow-y-auto rounded border border-slate-800 bg-slate-950 p-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold text-slate-300">Built Slots</p>
+            <button
+              type="button"
+              className="rounded bg-slate-800 px-2 py-1 text-[11px] text-slate-200"
+              onClick={onClose}
+            >
+              Close
+            </button>
+          </div>
+          <ItemSlots build={build} onRemove={onRemove} />
+          <p className="text-[11px] text-slate-400">Click an occupied slot to remove the item.</p>
+        </div>
+        <div className="overflow-y-auto rounded border border-slate-800 bg-slate-950 p-2">
+          <ShopMenu tab={tab} setTab={setTab} activeIds={activeIds} onAdd={onAdd} />
+        </div>
+        <div className="space-y-3 overflow-y-auto rounded border border-slate-800 bg-slate-950 p-3 text-xs">
+          <div>
+            <p className="text-sm font-semibold">Investment Summary</p>
+            <p className="text-[11px] text-slate-400">Breakpoints currently mirror the gun investment table.</p>
+          </div>
+          <div className="space-y-1 rounded border border-slate-800 p-2">
+            <p className="font-medium text-slate-300">Gun</p>
+            <p>Soul investment: <span className="font-mono">{categorySoulInvestment.gun}</span></p>
+            <p>Applied weapon bonus: <span className="font-mono">+{(gunInvestmentPct * 100).toFixed(0)}%</span></p>
+          </div>
+          <div className="space-y-1 rounded border border-slate-800 p-2">
+            <p className="font-medium text-slate-300">Vitality (placeholder)</p>
+            <p>Soul investment: <span className="font-mono">{categorySoulInvestment.vitality}</span></p>
+            <p>Projected breakpoint value: <span className="font-mono">+{(vitalityInvestmentPct * 100).toFixed(0)}%</span></p>
+          </div>
+          <div className="space-y-1 rounded border border-slate-800 p-2">
+            <p className="font-medium text-slate-300">Spirit (placeholder)</p>
+            <p>Soul investment: <span className="font-mono">{categorySoulInvestment.spirit}</span></p>
+            <p>Projected breakpoint value: <span className="font-mono">+{(spiritInvestmentPct * 100).toFixed(0)}%</span></p>
+          </div>
+          <div className="space-y-1 rounded border border-slate-800 p-2">
+            <p className="font-medium text-slate-300">Net Stats from Built Gun Items</p>
+            {gunEffectSummary.length > 0 ? (
+              <p>{gunEffectSummary.join(" · ")}</p>
+            ) : (
+              <p className="text-slate-400">No built gun-item bonuses yet.</p>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
