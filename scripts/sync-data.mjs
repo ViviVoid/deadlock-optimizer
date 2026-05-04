@@ -24,6 +24,87 @@ function parseNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function usageFlags(prop) {
+  if (!prop || !Array.isArray(prop.usage_flags)) return [];
+  return prop.usage_flags.map((flag) => String(flag));
+}
+
+function hasModeledEffects(effects) {
+  return Boolean(
+    effects.weaponDamagePct ||
+      effects.fireRatePct ||
+      effects.clipSizePct ||
+      effects.reloadReductionPct ||
+      effects.bulletLifestealPct ||
+      effects.flatWeaponDamage ||
+      effects.flatBaseDamage ||
+      effects.damageAmplificationPct
+  );
+}
+
+function emptyEffects(description = "") {
+  return {
+    weaponDamagePct: 0,
+    fireRatePct: 0,
+    clipSizePct: 0,
+    reloadReductionPct: 0,
+    bulletLifestealPct: 0,
+    flatWeaponDamage: 0,
+    flatBaseDamage: 0,
+    damageAmplificationPct: 0,
+    description,
+  };
+}
+
+function mapStatKey(rawName) {
+  const key = String(rawName ?? "").toLowerCase();
+  if (!key) return null;
+
+  if (
+    key.includes("baseattackdamagepercent") ||
+    key.includes("weaponpower") ||
+    key.includes("bonusweaponpower") ||
+    key.includes("nonplayerbonusweaponpower")
+  ) {
+    return "weaponDamagePct";
+  }
+  if (key.includes("bonusfirerate") || key.includes("activatedfirerate") || key.includes("ambushbonusfirerate")) {
+    return "fireRatePct";
+  }
+  if (key.includes("bonusclipsizepercent") || key.includes("bonusclipsize")) {
+    return "clipSizePct";
+  }
+  if (
+    key.includes("ammoreloadpercent") ||
+    key.includes("reloadreductionpercent") ||
+    key.includes("activereloadpercent")
+  ) {
+    return "reloadReductionPct";
+  }
+  if (key.includes("bulletlifestealpercent")) {
+    return "bulletLifestealPct";
+  }
+  return null;
+}
+
+function looksConditionalPropertyName(rawName) {
+  const key = String(rawName ?? "");
+  return (
+    key.startsWith("Proc") ||
+    key.startsWith("Activated") ||
+    key.includes("CloseRange") ||
+    key.includes("LongRange") ||
+    key.includes("Ambush")
+  );
+}
+
+function applyModeledStat(target, statKey, valueRaw) {
+  if (!statKey) return;
+  const value = parseNumber(valueRaw);
+  if (!value) return;
+  target[statKey] += value / 100;
+}
+
 const legacyIdByNormalizedName = {
   closequarters: "close_quarters",
   // Rapid Rounds is the 800 tier predecessor; Swift Striker (1600) maps to the legacy ID.
@@ -53,18 +134,6 @@ function conditionalMetaForItem(entry) {
     return { conditionalId: "shadow_weave_active", conditionalLabel: "Shadow Weave active window" };
   }
   return null;
-}
-
-function rawHasConditionalSignals(raw) {
-  for (const prop of Object.values(raw.properties ?? {})) {
-    if (Array.isArray(prop.usage_flags) && prop.usage_flags.includes("ConditionallyApplied")) return true;
-  }
-  for (const sec of raw.tooltip_sections ?? []) {
-    for (const at of sec.section_attributes ?? []) {
-      if (Array.isArray(at.important_properties) && at.important_properties.length > 0) return true;
-    }
-  }
-  return false;
 }
 
 function tierFromWhitelist(bucket) {
@@ -97,17 +166,8 @@ function normalizeItem(entry) {
   const descriptionString =
     typeof rawDescription === "string" ? rawDescription : rawDescription?.desc ?? "";
 
-  const effects = {
-    weaponDamagePct: 0,
-    fireRatePct: 0,
-    clipSizePct: 0,
-    reloadReductionPct: 0,
-    bulletLifestealPct: 0,
-    flatWeaponDamage: 0,
-    flatBaseDamage: 0,
-    damageAmplificationPct: 0,
-    description: stripHtml(descriptionString),
-  };
+  const effects = emptyEffects(stripHtml(descriptionString));
+  const conditionalEffects = emptyEffects();
 
   // Conditional effects (binary toggle in UI) are mapped at the item-level.
   if (conditionalMeta) {
@@ -118,39 +178,13 @@ function normalizeItem(entry) {
 
   const props = raw.properties ?? {};
   for (const [key, prop] of Object.entries(props)) {
-    const lower = key.toLowerCase();
-    const val = parseNumber(prop.value);
+    const statKey = mapStatKey(key);
+    if (!statKey) continue;
 
-    if (lower.includes("weaponpower") || lower.includes("bonusweaponpower") || lower.includes("closeRangeBonusWeaponPower".toLowerCase())) {
-      // Percent weapon damage.
-      // Close Quarters uses a conditional "CloseRangeBonusWeaponPower" stat.
-      if (val !== 0) effects.weaponDamagePct = val / 100;
-    }
-
-    if (lower.includes("bonusfirerate") || lower.includes("fireRatebonus".toLowerCase()) || lower.includes("ambushbonusfirerate".toLowerCase())) {
-      if (val !== 0) effects.fireRatePct = val / 100;
-    }
-
-    if (lower.includes("bonusclipsize") && lower.includes("percent")) {
-      if (val !== 0) effects.clipSizePct = val / 100;
-    }
-
-    if (lower.includes("ammoreloadpercent") || lower.includes("activereloadpercent")) {
-      if (val !== 0) effects.reloadReductionPct = val / 100;
-    }
-
-    if (lower.includes("bulletlifestealpercent")) {
-      if (val !== 0) effects.bulletLifestealPct = val / 100;
-    }
-
-    // Conditional mapping from property key
-    if (key === "CloseRangeBonusWeaponPower" && val !== 0) {
-      // Map conditional damage into the item effect and use the close-quarters toggle.
-      effects.weaponDamagePct = val / 100;
-    }
-    if (key === "AmbushBonusFireRate" && val !== 0) {
-      effects.fireRatePct = val / 100;
-    }
+    const conditionalByUsage = usageFlags(prop).includes("ConditionallyApplied");
+    const conditionalByName = looksConditionalPropertyName(key);
+    const target = conditionalByUsage || conditionalByName ? conditionalEffects : effects;
+    applyModeledStat(target, statKey, prop.value);
   }
 
   // Some key weapon/rof bonuses are encoded under `upgrades[].property_upgrades[]`.
@@ -161,43 +195,45 @@ function normalizeItem(entry) {
       const name = String(pu.name ?? "");
       const bonus = parseNumber(pu.bonus);
       if (!bonus) continue;
-
-      if (name.includes("AttackDamagePercent")) {
-        effects.weaponDamagePct = bonus / 100;
-      }
-      if (name.includes("BonusFireRate") || name.includes("ActivatedFireRate")) {
-        effects.fireRatePct = bonus / 100;
-      }
-      if (name.includes("BonusClipSizePercent")) {
-        effects.clipSizePct = bonus / 100;
-      }
-      if (name.includes("AmmoReloadPercent") || name.includes("ReloadReductionPercent")) {
-        effects.reloadReductionPct = bonus / 100;
-      }
-      if (name.includes("BulletLifestealPercent")) {
-        effects.bulletLifestealPct = bonus / 100;
-      }
+      const statKey = mapStatKey(name);
+      if (!statKey) continue;
+      const target = looksConditionalPropertyName(name) ? conditionalEffects : effects;
+      applyModeledStat(target, statKey, bonus);
     }
   }
 
-  // Conditional items: if we detect known ones, set conditionalId/label for UI toggling.
-  const conditionalId = conditionalMeta?.conditionalId;
-  const conditionalLabel = conditionalMeta?.conditionalLabel;
-
-  let conditionalEffects;
   if (raw.class_name === "upgrade_burst_fire") {
-    effects.fireRatePct = parseNumber(raw.properties?.BonusFireRate?.value) / 100;
+    effects.fireRatePct = 0;
+    conditionalEffects.fireRatePct = 0;
+    applyModeledStat(effects, "fireRatePct", raw.properties?.BonusFireRate?.value);
     const procFr = parseNumber(raw.properties?.ActivatedFireRate?.value) / 100;
-    if (procFr) conditionalEffects = { fireRatePct: procFr };
+    if (procFr) conditionalEffects.fireRatePct += procFr;
   }
 
-  const hasConditionalEffects =
-    Boolean(conditionalMeta) || Boolean(conditionalEffects) || rawHasConditionalSignals(raw);
+  const hasConditionalModeledStats = hasModeledEffects(conditionalEffects);
+  const hasConditionalEffects = Boolean(conditionalMeta) || hasConditionalModeledStats;
   const isActiveItem = Boolean(raw.is_active_item);
 
   // Upgrade replacement rule: predecessor is stored in `component_items` as class_names.
   const componentItems = raw.component_items ?? [];
   const upgradesFromRaw = componentItems.length ? String(componentItems[0]) : undefined;
+
+  const resolvedConditionalId = conditionalMeta?.conditionalId ?? (hasConditionalModeledStats ? `${internalId}_conditional` : undefined);
+  const resolvedConditionalLabel =
+    conditionalMeta?.conditionalLabel ?? (hasConditionalModeledStats ? `${entry.name} conditional effect active` : undefined);
+
+  const trimmedConditionalEffects = hasConditionalModeledStats
+    ? {
+        weaponDamagePct: conditionalEffects.weaponDamagePct,
+        fireRatePct: conditionalEffects.fireRatePct,
+        clipSizePct: conditionalEffects.clipSizePct,
+        reloadReductionPct: conditionalEffects.reloadReductionPct,
+        bulletLifestealPct: conditionalEffects.bulletLifestealPct,
+        flatWeaponDamage: conditionalEffects.flatWeaponDamage,
+        flatBaseDamage: conditionalEffects.flatBaseDamage,
+        damageAmplificationPct: conditionalEffects.damageAmplificationPct,
+      }
+    : undefined;
 
   return {
     id: internalId,
@@ -206,9 +242,9 @@ function normalizeItem(entry) {
     tier,
     baseCost: Number(entry.cost ?? tier),
     upgradesFrom: undefined, // filled in after we build a className -> id map
-    conditionalId,
-    conditionalLabel,
-    conditionalEffects,
+    conditionalId: resolvedConditionalId,
+    conditionalLabel: resolvedConditionalLabel,
+    conditionalEffects: trimmedConditionalEffects,
     isActiveItem,
     hasConditionalEffects,
     effects,
